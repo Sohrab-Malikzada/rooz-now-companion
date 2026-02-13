@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { motion } from "framer-motion";
+import { toast } from "sonner";
 import heroBg from "@/assets/hero-bg.jpg";
 import { AppHeader } from "@/components/AppHeader";
 import { ChatBubble } from "@/components/ChatBubble";
@@ -7,21 +8,69 @@ import { ChatInput } from "@/components/ChatInput";
 import { MoodIndicator } from "@/components/MoodIndicator";
 import { DailySuggestions } from "@/components/DailySuggestions";
 import { type Message, type Mood } from "@/lib/types";
-import { INITIAL_MESSAGES } from "@/lib/constants";
-import { detectMood, getMoodResponse, getTimeGreeting } from "@/lib/mood";
+import { detectMood, getTimeGreeting } from "@/lib/mood";
+import { streamChat } from "@/lib/chat-stream";
+import { supabase } from "@/integrations/supabase/client";
+
+const SESSION_ID = "default";
 
 const Index = () => {
-  const [messages, setMessages] = useState<Message[]>(INITIAL_MESSAGES);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [currentMood, setCurrentMood] = useState<Mood>("calm");
   const [isTyping, setIsTyping] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(true);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const [initialized, setInitialized] = useState(false);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const handleSend = (text: string) => {
+  // Load existing messages on mount
+  useEffect(() => {
+    const loadMessages = async () => {
+      const { data } = await supabase
+        .from("chat_messages")
+        .select("*")
+        .eq("session_id", SESSION_ID)
+        .order("created_at", { ascending: true });
+
+      if (data && data.length > 0) {
+        setMessages(
+          data.map((m: any) => ({
+            id: m.id,
+            role: m.role,
+            content: m.content,
+            timestamp: new Date(m.created_at),
+            mood: m.mood as Mood | undefined,
+          }))
+        );
+        setShowSuggestions(false);
+      } else {
+        // First visit - send greeting
+        const greeting = getTimeGreeting();
+        const greetingMsg: Message = {
+          id: "greeting",
+          role: "assistant",
+          content: `سلام رفیق! 👋 من روزنو هستم، همراه هر روزت. ${greeting}`,
+          timestamp: new Date(),
+          mood: "calm",
+        };
+        setMessages([greetingMsg]);
+        // Save greeting to DB
+        await supabase.from("chat_messages").insert({
+          session_id: SESSION_ID,
+          role: "assistant",
+          content: greetingMsg.content,
+          mood: "calm",
+        });
+      }
+      setInitialized(true);
+    };
+    loadMessages();
+  }, []);
+
+  const handleSend = async (text: string) => {
     const mood = detectMood(text);
     setCurrentMood(mood);
     setShowSuggestions(false);
@@ -36,19 +85,63 @@ const Index = () => {
     setMessages((prev) => [...prev, userMsg]);
     setIsTyping(true);
 
-    // Simulate AI response
-    setTimeout(() => {
-      const response = getMoodResponse(mood);
-      const aiMsg: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: response,
-        timestamp: new Date(),
-        mood,
-      };
-      setMessages((prev) => [...prev, aiMsg]);
+    // Save user message to DB
+    await supabase.from("chat_messages").insert({
+      session_id: SESSION_ID,
+      role: "user",
+      content: text,
+      mood,
+    });
+
+    let assistantContent = "";
+    const assistantId = (Date.now() + 1).toString();
+
+    try {
+      await streamChat({
+        messages: [{ role: "user", content: text }],
+        sessionId: SESSION_ID,
+        onDelta: (chunk) => {
+          assistantContent += chunk;
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (last?.role === "assistant" && last.id === assistantId) {
+              return prev.map((m, i) =>
+                i === prev.length - 1 ? { ...m, content: assistantContent } : m
+              );
+            }
+            return [
+              ...prev,
+              {
+                id: assistantId,
+                role: "assistant" as const,
+                content: assistantContent,
+                timestamp: new Date(),
+                mood,
+              },
+            ];
+          });
+        },
+        onDone: async () => {
+          setIsTyping(false);
+          // Save assistant message to DB
+          if (assistantContent) {
+            await supabase.from("chat_messages").insert({
+              session_id: SESSION_ID,
+              role: "assistant",
+              content: assistantContent,
+              mood,
+            });
+          }
+        },
+        onError: (error) => {
+          setIsTyping(false);
+          toast.error(error);
+        },
+      });
+    } catch (e) {
       setIsTyping(false);
-    }, 1200 + Math.random() * 800);
+      toast.error("خطا در اتصال به هوش مصنوعی");
+    }
   };
 
   return (
@@ -78,7 +171,7 @@ const Index = () => {
             <ChatBubble key={msg.id} message={msg} />
           ))}
 
-          {isTyping && (
+          {isTyping && messages[messages.length - 1]?.role !== "assistant" && (
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
@@ -111,7 +204,7 @@ const Index = () => {
         </div>
 
         {/* Daily suggestions */}
-        {showSuggestions && (
+        {showSuggestions && initialized && (
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
