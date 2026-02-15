@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect } from "react";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
 import heroBg from "@/assets/hero-bg.jpg";
 import { AppHeader } from "@/components/AppHeader";
+import { AppSidebar } from "@/components/AppSidebar";
 import { ChatBubble } from "@/components/ChatBubble";
 import { ChatInput } from "@/components/ChatInput";
 import { MoodIndicator } from "@/components/MoodIndicator";
@@ -11,14 +12,15 @@ import { type Message, type Mood } from "@/lib/types";
 import { detectMood, getTimeGreeting } from "@/lib/mood";
 import { streamChat } from "@/lib/chat-stream";
 import { supabase } from "@/integrations/supabase/client";
-
-const SESSION_ID = "default";
+import { useAuth } from "@/hooks/useAuth";
 
 const Index = () => {
+  const { user } = useAuth();
   const [messages, setMessages] = useState<Message[]>([]);
   const [currentMood, setCurrentMood] = useState<Mood>("calm");
   const [isTyping, setIsTyping] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const [initialized, setInitialized] = useState(false);
 
@@ -26,13 +28,13 @@ const Index = () => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Load existing messages on mount
   useEffect(() => {
+    if (!user) return;
     const loadMessages = async () => {
       const { data } = await supabase
         .from("chat_messages")
         .select("*")
-        .eq("session_id", SESSION_ID)
+        .eq("user_id", user.id)
         .order("created_at", { ascending: true });
 
       if (data && data.length > 0) {
@@ -47,7 +49,6 @@ const Index = () => {
         );
         setShowSuggestions(false);
       } else {
-        // First visit - send greeting
         const greeting = getTimeGreeting();
         const greetingMsg: Message = {
           id: "greeting",
@@ -57,9 +58,9 @@ const Index = () => {
           mood: "calm",
         };
         setMessages([greetingMsg]);
-        // Save greeting to DB
         await supabase.from("chat_messages").insert({
-          session_id: SESSION_ID,
+          user_id: user.id,
+          session_id: user.id,
           role: "assistant",
           content: greetingMsg.content,
           mood: "calm",
@@ -68,9 +69,10 @@ const Index = () => {
       setInitialized(true);
     };
     loadMessages();
-  }, []);
+  }, [user]);
 
   const handleSend = async (text: string) => {
+    if (!user) return;
     const mood = detectMood(text);
     setCurrentMood(mood);
     setShowSuggestions(false);
@@ -85,13 +87,22 @@ const Index = () => {
     setMessages((prev) => [...prev, userMsg]);
     setIsTyping(true);
 
-    // Save user message to DB
-    await supabase.from("chat_messages").insert({
-      session_id: SESSION_ID,
-      role: "user",
-      content: text,
-      mood,
-    });
+    // Save user message + sentiment log
+    await Promise.all([
+      supabase.from("chat_messages").insert({
+        user_id: user.id,
+        session_id: user.id,
+        role: "user",
+        content: text,
+        mood,
+      }),
+      supabase.from("sentiment_logs").insert({
+        user_id: user.id,
+        mood,
+        intensity: 5,
+        source: "chat",
+      }),
+    ]);
 
     let assistantContent = "";
     const assistantId = (Date.now() + 1).toString();
@@ -99,7 +110,7 @@ const Index = () => {
     try {
       await streamChat({
         messages: [{ role: "user", content: text }],
-        sessionId: SESSION_ID,
+        sessionId: user.id,
         onDelta: (chunk) => {
           assistantContent += chunk;
           setMessages((prev) => {
@@ -111,22 +122,16 @@ const Index = () => {
             }
             return [
               ...prev,
-              {
-                id: assistantId,
-                role: "assistant" as const,
-                content: assistantContent,
-                timestamp: new Date(),
-                mood,
-              },
+              { id: assistantId, role: "assistant" as const, content: assistantContent, timestamp: new Date(), mood },
             ];
           });
         },
         onDone: async () => {
           setIsTyping(false);
-          // Save assistant message to DB
           if (assistantContent) {
             await supabase.from("chat_messages").insert({
-              session_id: SESSION_ID,
+              user_id: user.id,
+              session_id: user.id,
               role: "assistant",
               content: assistantContent,
               mood,
@@ -138,7 +143,7 @@ const Index = () => {
           toast.error(error);
         },
       });
-    } catch (e) {
+    } catch {
       setIsTyping(false);
       toast.error("خطا در اتصال به هوش مصنوعی");
     }
@@ -146,26 +151,22 @@ const Index = () => {
 
   return (
     <div className="relative min-h-screen flex flex-col">
-      {/* Background */}
       <div className="fixed inset-0 z-0">
-        <img
-          src={heroBg}
-          alt=""
-          className="w-full h-full object-cover opacity-30"
-        />
+        <img src={heroBg} alt="" className="w-full h-full object-cover opacity-30" />
         <div className="absolute inset-0 bg-gradient-to-b from-background/80 via-background/95 to-background" />
       </div>
 
-      {/* Main content */}
-      <div className="relative z-10 flex flex-col min-h-screen max-w-lg mx-auto w-full p-4 gap-4">
-        <AppHeader />
+      <AnimatePresence>
+        <AppSidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+      </AnimatePresence>
 
-        {/* Mood indicator */}
+      <div className="relative z-10 flex flex-col min-h-screen max-w-lg mx-auto w-full p-4 gap-4">
+        <AppHeader onMenuClick={() => setSidebarOpen(true)} />
+
         <div className="flex justify-center">
           <MoodIndicator mood={currentMood} />
         </div>
 
-        {/* Chat area */}
         <div className="flex-1 overflow-y-auto scrollbar-hidden space-y-1 py-2">
           {messages.map((msg) => (
             <ChatBubble key={msg.id} message={msg} />
@@ -181,40 +182,21 @@ const Index = () => {
                 <span className="text-sm">🌟</span>
               </div>
               <div className="glass-light rounded-2xl rounded-bl-md px-4 py-3 flex items-center gap-1">
-                <motion.span
-                  animate={{ opacity: [0.3, 1, 0.3] }}
-                  transition={{ repeat: Infinity, duration: 1, delay: 0 }}
-                  className="w-1.5 h-1.5 rounded-full bg-primary"
-                />
-                <motion.span
-                  animate={{ opacity: [0.3, 1, 0.3] }}
-                  transition={{ repeat: Infinity, duration: 1, delay: 0.2 }}
-                  className="w-1.5 h-1.5 rounded-full bg-primary"
-                />
-                <motion.span
-                  animate={{ opacity: [0.3, 1, 0.3] }}
-                  transition={{ repeat: Infinity, duration: 1, delay: 0.4 }}
-                  className="w-1.5 h-1.5 rounded-full bg-primary"
-                />
+                <motion.span animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1, delay: 0 }} className="w-1.5 h-1.5 rounded-full bg-primary" />
+                <motion.span animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1, delay: 0.2 }} className="w-1.5 h-1.5 rounded-full bg-primary" />
+                <motion.span animate={{ opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1, delay: 0.4 }} className="w-1.5 h-1.5 rounded-full bg-primary" />
               </div>
             </motion.div>
           )}
-
           <div ref={chatEndRef} />
         </div>
 
-        {/* Daily suggestions */}
         {showSuggestions && initialized && (
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.5 }}
-          >
+          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.5 }}>
             <DailySuggestions />
           </motion.div>
         )}
 
-        {/* Input */}
         <ChatInput onSend={handleSend} disabled={isTyping} />
       </div>
     </div>
