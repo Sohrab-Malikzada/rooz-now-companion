@@ -13,20 +13,39 @@ serve(async (req) => {
   }
 
   try {
-    const { sessionId, key, value } = await req.json();
+    const { userId, key, value } = await req.json();
+    if (!userId || !key || !value) {
+      return new Response(JSON.stringify({ error: "Missing fields" }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    const { error } = await supabase
+    // Check if key exists for user
+    const { data: existing } = await supabase
       .from("user_memory")
-      .upsert(
-        { session_id: sessionId || "default", key, value },
-        { onConflict: "session_id,key" }
-      );
+      .select("id")
+      .eq("user_id", userId)
+      .eq("key", key)
+      .single();
 
-    if (error) throw error;
+    if (existing) {
+      const { error } = await supabase
+        .from("user_memory")
+        .update({ value, updated_at: new Date().toISOString() })
+        .eq("id", existing.id);
+      if (error) throw error;
+    } else {
+      const { error } = await supabase
+        .from("user_memory")
+        .insert({ user_id: userId, session_id: userId, key, value });
+      if (error) throw error;
+    }
 
     return new Response(JSON.stringify({ success: true }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },

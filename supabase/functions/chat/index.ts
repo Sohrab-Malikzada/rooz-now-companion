@@ -41,27 +41,46 @@ serve(async (req) => {
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY is not configured");
 
-    // Load memory context
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
+    // Load user profile for context
+    let profileContext = "";
+    if (sessionId && sessionId !== "default") {
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("display_name, profession, interests, bio")
+        .eq("user_id", sessionId)
+        .single();
+
+      if (profile) {
+        const parts = [];
+        if (profile.display_name) parts.push(`اسم: ${profile.display_name}`);
+        if (profile.profession) parts.push(`شغل: ${profile.profession}`);
+        if (profile.interests?.length) parts.push(`علاقه‌مندی‌ها: ${profile.interests.join("، ")}`);
+        if (profile.bio) parts.push(`درباره: ${profile.bio}`);
+        if (parts.length) profileContext = "\n\nپروفایل کاربر:\n" + parts.join("\n");
+      }
+    }
+
+    // Load memory context
     let memoryContext = "";
     const { data: memories } = await supabase
       .from("user_memory")
       .select("key, value")
-      .eq("session_id", sessionId || "default");
+      .eq("user_id", sessionId || "default");
 
     if (memories && memories.length > 0) {
       memoryContext = "\n\nحافظه بلندمدت از کاربر:\n" +
         memories.map((m: any) => `- ${m.key}: ${m.value}`).join("\n");
     }
 
-    // Load recent chat history for context
+    // Load recent chat history
     const { data: recentMessages } = await supabase
       .from("chat_messages")
       .select("role, content")
-      .eq("session_id", sessionId || "default")
+      .eq("user_id", sessionId || "default")
       .order("created_at", { ascending: false })
       .limit(20);
 
@@ -70,7 +89,7 @@ serve(async (req) => {
       : [];
 
     const allMessages = [
-      { role: "system", content: SYSTEM_PROMPT + memoryContext },
+      { role: "system", content: SYSTEM_PROMPT + profileContext + memoryContext },
       ...historyMessages,
       ...messages,
     ];

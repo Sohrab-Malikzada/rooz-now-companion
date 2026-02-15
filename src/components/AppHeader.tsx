@@ -1,6 +1,11 @@
 import { motion } from "framer-motion";
+import { Menu } from "lucide-react";
 
-export function AppHeader() {
+interface AppHeaderProps {
+  onMenuClick?: () => void;
+}
+
+export function AppHeader({ onMenuClick }: AppHeaderProps) {
   return (
     <motion.header
       initial={{ opacity: 0, y: -10 }}
@@ -16,9 +21,16 @@ export function AppHeader() {
           <p className="text-[10px] text-muted-foreground tracking-wider">BREAK THE LOOP</p>
         </div>
       </div>
-      <div className="flex items-center gap-2">
-        <div className="w-2 h-2 rounded-full bg-mood-motivated animate-pulse-glow" />
-        <span className="text-xs text-muted-foreground">آنلاین</span>
+      <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
+          <div className="w-2 h-2 rounded-full bg-mood-motivated animate-pulse-glow" />
+          <span className="text-xs text-muted-foreground">آنلاین</span>
+        </div>
+        {onMenuClick && (
+          <button onClick={onMenuClick} className="text-muted-foreground hover:text-foreground transition-colors">
+            <Menu size={20} />
+          </button>
+        )}
       </div>
     </motion.header>
   );
